@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.angga.maxihop'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.angga.maxihop'
+        minSdk 22          // Fire OS 5 and newer
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // Fixed key so new builds install over old ones without uninstalling.
+    // Fine for a personal sideloaded app; don't reuse it for anything published.
+    signingConfigs {
+        personal {
+            storeFile file('maxihop.keystore')
+            storePassword 'maxihop123'
+            keyAlias 'maxihop'
+            keyPassword 'maxihop123'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.personal
+        }
+        debug {
+            signingConfig signingConfigs.personal
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
