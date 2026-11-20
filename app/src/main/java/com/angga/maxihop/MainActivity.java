@@ -15,6 +15,10 @@ import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.WindowManager;
+import android.content.pm.PackageInfo;
+import android.graphics.Typeface;
+import android.view.Gravity;
+import android.webkit.ConsoleMessage;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -23,6 +27,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
@@ -44,6 +49,8 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private CursorView cursor;
+    private TextView logView;
+    private final StringBuilder log = new StringBuilder();
     private PermissionRequest pendingRequest;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable hideCursor = () -> cursor.setVisible(false);
@@ -64,7 +71,21 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(cursor, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        logView = new TextView(this);
+        logView.setTextColor(Color.WHITE);
+        logView.setBackgroundColor(Color.argb(200, 0, 0, 0));
+        logView.setTypeface(Typeface.MONOSPACE);
+        logView.setTextSize(12);
+        logView.setPadding(16, 8, 16, 8);
+        logView.setGravity(Gravity.BOTTOM);
+        logView.setVisibility(android.view.View.GONE);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        lp.gravity = Gravity.BOTTOM;
+        root.addView(logView, lp);
         setContentView(root);
+        logLine("App 1.1 | Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ") | " + webViewVersion());
+        logLine("Play/Pause = camera test, Rewind = show/hide this panel");
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -95,6 +116,17 @@ public class MainActivity extends Activity {
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
                 runOnUiThread(() -> handleWebPermission(request));
+            }
+
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage m) {
+                String msg = m.message();
+                if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
+                        || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING
+                        || msg.startsWith("[diag]")) {
+                    logLine(m.messageLevel().name().charAt(0) + " " + msg);
+                }
+                return true;
             }
 
             @Override
@@ -137,7 +169,9 @@ public class MainActivity extends Activity {
     }
 
     private void handleWebPermission(PermissionRequest request) {
+        logLine("Page asked for: " + java.util.Arrays.toString(request.getResources()) + " from " + request.getOrigin());
         if (!isTrusted(request.getOrigin())) {
+            logLine("Denied (not a trusted site)");
             request.deny();
             return;
         }
@@ -168,10 +202,12 @@ public class MainActivity extends Activity {
         }
         if (ok.isEmpty()) {
             request.deny();
+            logLine("Denied: app has no camera permission");
             Toast.makeText(this, "Camera permission is off. Turn it on in Settings > Applications > MaxiHop.",
                     Toast.LENGTH_LONG).show();
         } else {
             request.grant(ok.toArray(new String[0]));
+            logLine("Granted: " + ok);
         }
     }
 
@@ -210,6 +246,17 @@ public class MainActivity extends Activity {
                         clickAt(cursor.getPointerX(), cursor.getPointerY());
                     }
                     bumpCursor();
+                }
+                return true;
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+            case KeyEvent.KEYCODE_MEDIA_PLAY:
+            case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                if (down && e.getRepeatCount() == 0) runCameraTest();
+                return true;
+            case KeyEvent.KEYCODE_MEDIA_REWIND:
+                if (down && e.getRepeatCount() == 0) {
+                    logView.setVisibility(logView.getVisibility() == android.view.View.VISIBLE
+                            ? android.view.View.GONE : android.view.View.VISIBLE);
                 }
                 return true;
             case KeyEvent.KEYCODE_MENU:
@@ -253,6 +300,51 @@ public class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
+    }
+
+    // ---------- Diagnostics ----------
+
+    private String webViewVersion() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                PackageInfo p = WebView.getCurrentWebViewPackage();
+                if (p != null) return p.packageName + " " + p.versionName;
+            }
+        } catch (Throwable ignored) { }
+        return "WebView (version unknown)";
+    }
+
+    private void logLine(String line) {
+        runOnUiThread(() -> {
+            log.append(line).append('\n');
+            String[] lines = log.toString().split("\n");
+            if (lines.length > 14) {
+                log.setLength(0);
+                for (int i = lines.length - 14; i < lines.length; i++) log.append(lines[i]).append('\n');
+            }
+            logView.setText(log.toString().trim());
+            logView.setVisibility(android.view.View.VISIBLE);
+        });
+    }
+
+    /** Tries the camera directly, outside MaxiHop, and reports each step on screen. */
+    private void runCameraTest() {
+        logLine("--- Camera test ---");
+        String js = "(async()=>{const L=m=>console.log('[diag] '+m);"
+                + "try{L('UA '+navigator.userAgent.replace(/.*Chrome\\//,'Chrome/').slice(0,40));"
+                + "L('secure='+window.isSecureContext+' mediaDevices='+!!navigator.mediaDevices);"
+                + "const d=await navigator.mediaDevices.enumerateDevices();"
+                + "L('devices: '+d.map(x=>x.kind+(x.label?'('+x.label.slice(0,20)+')':'')).join(', '));"
+                + "const t=new Promise((_,r)=>setTimeout(()=>r(new Error('TIMEOUT after 10s')),10000));"
+                + "const s=await Promise.race([navigator.mediaDevices.getUserMedia({video:true,audio:false}),t]);"
+                + "const v=s.getVideoTracks()[0];const st=v.getSettings();"
+                + "L('CAMERA OK: '+v.label+' '+st.width+'x'+st.height+'@'+st.frameRate);"
+                + "s.getTracks().forEach(x=>x.stop());"
+                + "const s2=await Promise.race([navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280,max:1920},height:{ideal:720,max:1080},frameRate:{ideal:30},facingMode:'user'}}),new Promise((_,r)=>setTimeout(()=>r(new Error('TIMEOUT after 10s')),10000))]);"
+                + "L('MaxiHop settings OK');s2.getTracks().forEach(x=>x.stop());"
+                + "L('webgl2='+!!document.createElement('canvas').getContext('webgl2')+' wasm='+(typeof WebAssembly));"
+                + "}catch(e){L('FAILED: '+e.name+' - '+e.message);}})()";
+        webView.evaluateJavascript(js, null);
     }
 
     // ---------- Lifecycle ----------
