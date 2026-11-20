@@ -30,6 +30,7 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -50,6 +51,8 @@ public class MainActivity extends Activity {
     private WebView webView;
     private CursorView cursor;
     private TextView logView;
+    private CameraBridge camBridge;
+    private String camShim = "";
     private final StringBuilder log = new StringBuilder();
     private PermissionRequest pendingRequest;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -84,7 +87,7 @@ public class MainActivity extends Activity {
         lp.gravity = Gravity.BOTTOM;
         root.addView(logView, lp);
         setContentView(root);
-        logLine("App 1.1 | Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ") | " + webViewVersion());
+        logLine("App 1.2 | Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ") | " + webViewVersion());
         logLine("Play/Pause = camera test, Rewind = show/hide this panel");
 
         WebSettings s = webView.getSettings();
@@ -96,10 +99,22 @@ public class MainActivity extends Activity {
         s.setLoadWithOverviewMode(true);
         s.setSupportZoom(false);
 
+        // Native webcam bridge: the Fire TV web engine can't see USB webcams, so the app reads it itself.
+        camBridge = new CameraBridge(this, this::logLine);
+        webView.addJavascriptInterface(camBridge, "FireCam");
+        camShim = readAsset("firecam-shim.js");
+
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 return false; // keep every link inside the app, never hand off to Silk
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                if (isTrusted(Uri.parse(url)) && !camShim.isEmpty()) {
+                    view.evaluateJavascript(camShim, null);
+                }
             }
 
             @Override
@@ -330,6 +345,7 @@ public class MainActivity extends Activity {
     /** Tries the camera directly, outside MaxiHop, and reports each step on screen. */
     private void runCameraTest() {
         logLine("--- Camera test ---");
+        logLine(camBridge.describe());
         String js = "(async()=>{const L=m=>console.log('[diag] '+m);"
                 + "try{L('UA '+navigator.userAgent.replace(/.*Chrome\\//,'Chrome/').slice(0,40));"
                 + "L('secure='+window.isSecureContext+' mediaDevices='+!!navigator.mediaDevices);"
@@ -345,6 +361,19 @@ public class MainActivity extends Activity {
                 + "L('webgl2='+!!document.createElement('canvas').getContext('webgl2')+' wasm='+(typeof WebAssembly));"
                 + "}catch(e){L('FAILED: '+e.name+' - '+e.message);}})()";
         webView.evaluateJavascript(js, null);
+    }
+
+    private String readAsset(String name) {
+        try (InputStream in = getAssets().open(name)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toString("UTF-8");
+        } catch (Exception e) {
+            logLine("Could not load " + name + ": " + e);
+            return "";
+        }
     }
 
     // ---------- Lifecycle ----------
@@ -371,6 +400,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        camBridge.stop();
         webView.destroy();
         super.onDestroy();
     }
