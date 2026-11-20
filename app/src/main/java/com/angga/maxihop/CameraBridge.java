@@ -15,6 +15,7 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Size;
 import android.webkit.JavascriptInterface;
@@ -43,6 +44,8 @@ public class CameraBridge {
     private volatile long seq = 0;
     private int width, height;
     private boolean firstFrameLogged;
+    private volatile int gen = 0;
+    private long lastEncode = 0;
 
     public CameraBridge(Context ctx, Logger logger) {
         this.ctx = ctx.getApplicationContext();
@@ -123,18 +126,21 @@ public class CameraBridge {
             reader.setOnImageAvailableListener(this::onImage, bg);
             firstFrameLogged = false;
             logger.log("Opening camera #" + id + " at " + width + "x" + height);
+            final int myGen = ++gen;
+            final ImageReader myReader = reader;
 
             manager().openCamera(id, new CameraDevice.StateCallback() {
                 @Override public void onOpened(CameraDevice d) {
+                    if (myGen != gen) { d.close(); return; }
                     device = d;
                     try {
-                        d.createCaptureSession(Collections.singletonList(reader.getSurface()),
+                        d.createCaptureSession(Collections.singletonList(myReader.getSurface()),
                                 new CameraCaptureSession.StateCallback() {
                                     @Override public void onConfigured(CameraCaptureSession s) {
                                         session = s;
                                         try {
                                             CaptureRequest.Builder b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-                                            b.addTarget(reader.getSurface());
+                                            b.addTarget(myReader.getSurface());
                                             s.setRepeatingRequest(b.build(), null, bg);
                                         } catch (Throwable t) { logger.log("Camera request failed: " + t); }
                                     }
@@ -160,8 +166,12 @@ public class CameraBridge {
     private void onImage(ImageReader r) {
         Image img = null;
         try {
+            if (r != reader) return;
             img = r.acquireLatestImage();
             if (img == null) return;
+            long now = SystemClock.uptimeMillis();
+            if (now - lastEncode < 40) return; // about 25 frames per second is plenty
+            lastEncode = now;
             byte[] nv21 = toNV21(img);
             ByteArrayOutputStream out = new ByteArrayOutputStream(64 * 1024);
             new YuvImage(nv21, ImageFormat.NV21, img.getWidth(), img.getHeight(), null)
@@ -216,10 +226,20 @@ public class CameraBridge {
 
     @JavascriptInterface
     public synchronized void stop() {
-        try { if (session != null) session.close(); } catch (Throwable ignored) { }
-        try { if (device != null) device.close(); } catch (Throwable ignored) { }
-        try { if (reader != null) reader.close(); } catch (Throwable ignored) { }
-        if (thread != null) thread.quitSafely();
-        session = null; device = null; reader = null; thread = null; latest = null;
+        gen++;
+        final CameraCaptureSession s = session;
+        final CameraDevice d = device;
+        final ImageReader r = reader;
+        final HandlerThread th = thread;
+        final Handler h = bg;
+        session = null; device = null; reader = null; thread = null; bg = null; latest = null;
+        Runnable close = () -> {
+            try { if (s != null) s.close(); } catch (Throwable ignored) { }
+            try { if (d != null) d.close(); } catch (Throwable ignored) { }
+            try { if (r != null) r.close(); } catch (Throwable ignored) { }
+            if (th != null) th.quitSafely();
+        };
+        // Close on the camera thread so a frame being converted is never closed under it.
+        if (h != null) h.post(close); else close.run();
     }
 }
