@@ -15,7 +15,9 @@ import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.WindowManager;
+import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.webkit.RenderProcessGoneDetail;
 import android.graphics.Typeface;
 import android.view.Gravity;
 import android.webkit.ConsoleMessage;
@@ -53,7 +55,15 @@ public class MainActivity extends Activity {
     private TextView logView;
     private CameraBridge camBridge;
     private String camShim = "";
-    private final StringBuilder log = new StringBuilder();
+    private static final StringBuilder log = new StringBuilder();
+    private SharedPreferences prefs;
+    private boolean safeMode;
+    /** Safe mode: run body tracking on the main thread without the graphics chip (less memory, no GPU crashes). */
+    private static final String SAFE_JS = "(function(){if(window.__fireSafe)return;window.__fireSafe=true;"
+            + "window.Worker=function(){throw new Error('workers off (safe mode)');};"
+            + "if(window.OffscreenCanvas){var g=OffscreenCanvas.prototype.getContext;"
+            + "OffscreenCanvas.prototype.getContext=function(t,o){if(/webgl/.test(t))return null;return g.call(this,t,o);};}"
+            + "console.log('[diag] Safe mode active');})();";
     private PermissionRequest pendingRequest;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable hideCursor = () -> cursor.setVisible(false);
@@ -62,6 +72,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("maxihop", MODE_PRIVATE);
+        safeMode = prefs.getBoolean("safeMode", false);
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((th, ex) -> {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            ex.printStackTrace(new java.io.PrintWriter(sw));
+            String st = sw.toString();
+            prefs.edit().putString("lastCrash", st.length() > 600 ? st.substring(0, 600) : st).commit();
+            if (prev != null) prev.uncaughtException(th, ex);
+        });
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
@@ -87,8 +107,14 @@ public class MainActivity extends Activity {
         lp.gravity = Gravity.BOTTOM;
         root.addView(logView, lp);
         setContentView(root);
-        logLine("App 1.2 | Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ") | " + webViewVersion());
-        logLine("Play/Pause = camera test, Rewind = show/hide this panel");
+        logLine("App 1.3 | Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ") | " + webViewVersion());
+        logLine("Play/Pause = camera test, Rewind = show/hide panel, Fast-forward = safe mode on/off");
+        logLine("Safe mode: " + (safeMode ? "ON" : "off"));
+        String lastCrash = prefs.getString("lastCrash", null);
+        if (lastCrash != null) {
+            logLine("LAST CRASH: " + lastCrash);
+            prefs.edit().remove("lastCrash").apply();
+        }
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -113,8 +139,21 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (isTrusted(Uri.parse(url)) && !camShim.isEmpty()) {
+                    if (safeMode) view.evaluateJavascript(SAFE_JS, null);
                     view.evaluateJavascript(camShim, null);
                 }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                // The web engine died (graphics crash or out of memory). Keep the app alive,
+                // switch to safe mode and start over instead of closing.
+                logLine("WEB ENGINE " + (detail.didCrash() ? "CRASHED" : "was killed (low memory)")
+                        + " -> switching safe mode ON and reloading");
+                camBridge.stop();
+                prefs.edit().putBoolean("safeMode", true).apply();
+                handler.post(MainActivity.this::recreate);
+                return true;
             }
 
             @Override
@@ -274,6 +313,15 @@ public class MainActivity extends Activity {
                             ? android.view.View.GONE : android.view.View.VISIBLE);
                 }
                 return true;
+            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+                if (down && e.getRepeatCount() == 0) {
+                    safeMode = !safeMode;
+                    prefs.edit().putBoolean("safeMode", safeMode).apply();
+                    logLine("Safe mode " + (safeMode ? "ON" : "off") + " - reloading");
+                    camBridge.stop();
+                    webView.reload();
+                }
+                return true;
             case KeyEvent.KEYCODE_MENU:
                 if (down && e.getRepeatCount() == 0) {
                     webView.reload();
@@ -401,6 +449,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
         camBridge.stop();
+        ((android.view.ViewGroup) webView.getParent()).removeView(webView);
         webView.destroy();
         super.onDestroy();
     }
